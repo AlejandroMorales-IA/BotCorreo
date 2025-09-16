@@ -1,0 +1,54 @@
+name: Email → Telegram Alerts
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # cada 5 minutos
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run checker
+        env:
+          # IMAP / correo
+          IMAP_HOST: ${{ secrets.IMAP_HOST }}
+          IMAP_PORT: ${{ secrets.IMAP_PORT }}          # opcional (por defecto 993)
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASS: ${{ secrets.IMAP_PASS }}
+          IMAP_FOLDER: INBOX
+          IMAP_SSL: "1"
+
+          # Filtros
+          SENDER_FILTERS: ${{ secrets.SENDER_FILTERS }}      # ej: "jefe@empresa.com,@cliente.com"
+          SUBJECT_KEYWORDS: ${{ secrets.SUBJECT_KEYWORDS }}  # ej: "urgente,propuesta" (opcional)
+
+          # Telegram
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          # Modo Gmail (usa etiquetas y X-GM-RAW). Pon "0" si NO usas Gmail.
+          GMAIL_MODE: "1"
+          GMAIL_LABEL: "1"
+          GMAIL_LABEL_NAME: "Notified"
+
+          # IMAP genérico (por si no usas Gmail)
+          ADD_IMAP_KEYWORD: "1"
+          IMAP_KEYWORD_NAME: "Notified"
+          RECENT_MINUTES: "60"   # limita búsqueda a correos recientes
+
+          # Opcional: marcar como leído (por defecto NO)
+          MARK_AS_READ: "0"
+        run: python main.py
