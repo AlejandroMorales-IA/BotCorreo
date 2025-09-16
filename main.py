@@ -145,13 +145,15 @@ def main():
         uids_to_process = set()
 
         if gmail_mode:
-            or_clause = " OR ".join([f'"{s.strip()}"' for s in senders])
+            # Unimos todos los remitentes en un solo OR dentro de from:()
+            or_clause = " OR ".join([s.strip() for s in senders])
             gm_query = f'from:({or_clause}) -label:Notified newer_than:{max(5, min(recent_minutes, 1440))}m'
             log(f"Gmail search query: {gm_query}")
             typ, data = M.uid("SEARCH", None, "X-GM-RAW", gm_query)
             log(f"SEARCH result typ={typ}, data={data}")
             if typ == "OK" and data and data[0]:
                 uids_to_process.update(data[0].decode().split())
+
         else:
             since_date = (datetime.now(timezone.utc) - timedelta(minutes=recent_minutes)).date()
             since_str = since_date.strftime("%d-%b-%Y")
