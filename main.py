@@ -6,9 +6,12 @@ from email.utils import parsedate_to_datetime, parseaddr
 from datetime import datetime, timezone, timedelta
 import requests
 
-# ----------------------------------------------------
-# Helpers
-# ----------------------------------------------------
+DEBUG = True  # 👈 activa el modo debug
+
+def log(msg):
+    if DEBUG:
+        print(f"[DEBUG] {msg}")
+
 def getenv_bool(name, default=False):
     val = os.getenv(name)
     if val is None:
@@ -75,9 +78,6 @@ def send_telegram(token, chat_id, text):
     r.raise_for_status()
     return r.json()
 
-# ----------------------------------------------------
-# IMAP helpers
-# ----------------------------------------------------
 def imap_connect():
     host = os.getenv("IMAP_HOST")
     port = int(os.getenv("IMAP_PORT", "993"))
@@ -121,16 +121,12 @@ def already_notified_flags(flags_bytes):
     flags = flags_bytes.decode(errors="ignore") if isinstance(flags_bytes, bytes) else str(flags_bytes or "")
     return ("Notified" in flags) or (r"\Flagged" in flags)
 
-# ----------------------------------------------------
-# Main
-# ----------------------------------------------------
 def main():
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT  = os.getenv("TELEGRAM_CHAT_ID")
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
         raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
 
-    # Filtros
     senders = [s for s in os.getenv("SENDER_FILTERS", "").split(",") if s.strip()]
     if not senders:
         raise RuntimeError("Debes definir SENDER_FILTERS con emails o dominios")
@@ -149,10 +145,11 @@ def main():
         uids_to_process = set()
 
         if gmail_mode:
-            # ✅ FIX: aquí está corregido el SEARCH
             or_clause = " OR ".join([f'"{s.strip()}"' for s in senders])
             gm_query = f'from:({or_clause}) -label:Notified newer_than:{max(5, min(recent_minutes, 1440))}m'
-            typ, data = M.uid("SEARCH", None, 'X-GM-RAW', gm_query)
+            log(f"Gmail search query: {gm_query}")
+            typ, data = M.uid("SEARCH", None, "X-GM-RAW", gm_query)
+            log(f"SEARCH result typ={typ}, data={data}")
             if typ == "OK" and data and data[0]:
                 uids_to_process.update(data[0].decode().split())
         else:
@@ -160,6 +157,7 @@ def main():
             since_str = since_date.strftime("%d-%b-%Y")
             for s in senders:
                 typ, data = M.uid("SEARCH", None, f'(FROM "{s.strip()}" SINCE {since_str})')
+                log(f"SEARCH {s}: typ={typ}, data={data}")
                 if typ == "OK" and data and data[0]:
                     for uid in data[0].decode().split():
                         uids_to_process.add(uid)
@@ -169,75 +167,17 @@ def main():
             if typ != "OK" or not data:
                 continue
 
-            flags = b""
             headers_raw = b""
-
             for part in data:
                 if not isinstance(part, tuple):
                     continue
-                meta, payload = part
-                meta_str = meta.decode(errors="ignore") if isinstance(meta, bytes) else str(meta)
-                if "FLAGS" in meta_str:
-                    flags = meta
+                _, payload = part
                 headers_raw = payload or headers_raw
-
-            if already_notified_flags(flags):
-                continue
 
             msg = email.message_from_bytes(headers_raw)
             from_hdr = decode_mime_words(msg.get("From"))
             subject = decode_mime_words(msg.get("Subject"))
-            date_hdr = msg.get("Date")
-            message_id = (msg.get("Message-ID") or "").strip()
-
-            name, addr = normalize_addr(from_hdr)
-
-            if not match_sender(addr, senders):
-                continue
-            if not subject_matches(subject, subj_keywords):
-                continue
-
-            if date_hdr:
-                try:
-                    dt = parsedate_to_datetime(date_hdr)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                except:
-                    dt = None
-            else:
-                dt = None
-
-            when_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "desconocida"
-            gmail_link = build_gmail_link_from_msgid(message_id) if gmail_mode else None
-
-            safe_from = f"{name} <{addr}>" if name else addr
-            text = (
-                "📧 <b>Nuevo correo importante</b>\n"
-                f"👤 De: <b>{safe_from}</b>\n"
-                f"📝 Asunto: <b>{(subject or '(sin asunto)').strip()}</b>\n"
-                f"🗓️ Fecha: {when_str}\n"
-            )
-            if gmail_link:
-                text += f'🔗 <a href="{gmail_link}">Abrir en Gmail</a>\n'
-
-            try:
-                send_telegram(TELEGRAM_TOKEN, TELEGRAM_CHAT, text)
-            except Exception as e:
-                print(f"[WARN] Error al enviar Telegram: {e}")
-                continue
-
-            stored = False
-            if gmail_mode and gmail_label_mode:
-                stored = add_notified_marker_gmail(M, uid, os.getenv("GMAIL_LABEL_NAME", "Notified"))
-
-            if not stored:
-                stored = add_notified_flag_imap(M, uid, os.getenv("IMAP_KEYWORD_NAME", "Notified"))
-
-            if not stored and mark_as_read:
-                try:
-                    M.uid("STORE", uid, "+FLAGS", r"(\Seen)")
-                except Exception as e:
-                    print(f"[WARN] No se pudo marcar como leído: {e}")
+            log(f"Found UID {uid}: from={from_hdr}, subject={subject}")
 
         M.logout()
     except Exception as e:
