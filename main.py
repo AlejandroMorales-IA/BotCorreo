@@ -1,5 +1,4 @@
 import os
-import re
 import imaplib
 import email
 from email.header import decode_header
@@ -7,11 +6,14 @@ from email.utils import parsedate_to_datetime, parseaddr
 from datetime import datetime, timezone, timedelta
 import requests
 
+# ----------------------------------------------------
+# Helpers
+# ----------------------------------------------------
 def getenv_bool(name, default=False):
     val = os.getenv(name)
     if val is None:
         return default
-    return str(val).strip().lower() in ("1","true","yes","y","on")
+    return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
 
 def decode_mime_words(s):
     if not s:
@@ -33,7 +35,6 @@ def normalize_addr(addr):
     return (name.strip(), email_addr.strip().lower())
 
 def match_sender(sender_addr, allow_list):
-    # allow_list admite emails completos o dominios (ej: @empresa.com)
     sender = sender_addr.lower()
     for item in allow_list:
         it = item.strip().lower()
@@ -57,25 +58,26 @@ def subject_matches(subject, keywords):
     return False
 
 def build_gmail_link_from_msgid(msgid):
-    # Enlace de búsqueda por Message-ID en Gmail
     if not msgid:
         return None
-    # Asegura que msgid vaya sin los <>
     mid = msgid.strip().lstrip("<").rstrip(">")
     return f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{mid}"
 
-def send_telegram(token, chat_id, text, disable_preview=True):
+def send_telegram(token, chat_id, text):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": disable_preview
+        "disable_web_page_preview": True
     }
     r = requests.post(url, json=payload, timeout=20)
     r.raise_for_status()
     return r.json()
 
+# ----------------------------------------------------
+# IMAP helpers
+# ----------------------------------------------------
 def imap_connect():
     host = os.getenv("IMAP_HOST")
     port = int(os.getenv("IMAP_PORT", "993"))
@@ -96,7 +98,6 @@ def imap_connect():
     return M
 
 def add_notified_marker_gmail(M, uid, label="Notified"):
-    # Añadir etiqueta de Gmail mediante X-GM-LABELS (no marca como leído)
     try:
         typ, _ = M.uid("STORE", uid, "+X-GM-LABELS", f"({label})")
         return typ == "OK"
@@ -104,14 +105,12 @@ def add_notified_marker_gmail(M, uid, label="Notified"):
         return False
 
 def add_notified_flag_imap(M, uid, keyword="Notified"):
-    # Intento estándar IMAP: palabra clave (puede no estar soportada)
     try:
         typ, _ = M.uid("STORE", uid, "+FLAGS", f"({keyword})")
         if typ == "OK":
             return True
     except:
         pass
-    # Fallback: usa \Flagged
     try:
         typ, _ = M.uid("STORE", uid, "+FLAGS", r"(\Flagged)")
         return typ == "OK"
@@ -122,6 +121,9 @@ def already_notified_flags(flags_bytes):
     flags = flags_bytes.decode(errors="ignore") if isinstance(flags_bytes, bytes) else str(flags_bytes or "")
     return ("Notified" in flags) or (r"\Flagged" in flags)
 
+# ----------------------------------------------------
+# Main
+# ----------------------------------------------------
 def main():
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT  = os.getenv("TELEGRAM_CHAT_ID")
@@ -135,47 +137,40 @@ def main():
 
     subj_keywords = [s for s in os.getenv("SUBJECT_KEYWORDS", "").split(",") if s.strip()]
     folder = os.getenv("IMAP_FOLDER", "INBOX")
-    gmail_mode = getenv_bool("GMAIL_MODE", True)  # True si usas Gmail
+    gmail_mode = getenv_bool("GMAIL_MODE", True)
     mark_as_read = getenv_bool("MARK_AS_READ", False)
-    gmail_label_mode = getenv_bool("GMAIL_LABEL", True)  # poner etiqueta en Gmail
-    recent_minutes = int(os.getenv("RECENT_MINUTES", "60"))  # para IMAP genérico limitar antigüedad
+    gmail_label_mode = getenv_bool("GMAIL_LABEL", True)
+    recent_minutes = int(os.getenv("RECENT_MINUTES", "60"))
 
     M = imap_connect()
     try:
-        # Necesitamos acceso de escritura si vamos a etiquetar/poner flags
-        M.select(folder, readonly=not (gmail_label_mode or mark_as_read or True))
+        M.select(folder, readonly=False)
 
         uids_to_process = set()
 
         if gmail_mode:
-            # Un único query X-GM-RAW con varios from y sin label:Notified
-            # Además, limitamos a correos recientes para evitar históricos
-            # newer_than admite m (min), h (hora), d (día). Usamos recent_minutes.
+            # ✅ FIX: aquí está corregido el SEARCH
             or_clause = " OR ".join([f'"{s.strip()}"' for s in senders])
             gm_query = f'from:({or_clause}) -label:Notified newer_than:{max(5, min(recent_minutes, 1440))}m'
-            typ, data = M.uid("SEARCH", "X-GM-RAW", gm_query)
+            typ, data = M.uid("SEARCH", None, 'X-GM-RAW', gm_query)
             if typ == "OK" and data and data[0]:
                 uids_to_process.update(data[0].decode().split())
         else:
-            # IMAP genérico: buscamos FROM por cada remitente y luego filtramos por fecha/flags
             since_date = (datetime.now(timezone.utc) - timedelta(minutes=recent_minutes)).date()
             since_str = since_date.strftime("%d-%b-%Y")
             for s in senders:
-                # Traemos incluso vistos; filtraremos por flags/fecha después
-                typ, data = M.uid("SEARCH", None, '(FROM "{}" SINCE {})'.format(s.strip(), since_str))
+                typ, data = M.uid("SEARCH", None, f'(FROM "{s.strip()}" SINCE {since_str})')
                 if typ == "OK" and data and data[0]:
                     for uid in data[0].decode().split():
                         uids_to_process.add(uid)
 
         for uid in sorted(uids_to_process):
-            # Recuperamos headers + FLAGS + INTERNALDATE
-            typ, data = M.uid("FETCH", uid, "(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
+            typ, data = M.uid("FETCH", uid, "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
             if typ != "OK" or not data:
                 continue
 
             flags = b""
             headers_raw = b""
-            internaldate = None
 
             for part in data:
                 if not isinstance(part, tuple):
@@ -184,12 +179,8 @@ def main():
                 meta_str = meta.decode(errors="ignore") if isinstance(meta, bytes) else str(meta)
                 if "FLAGS" in meta_str:
                     flags = meta
-                if "INTERNALDATE" in meta_str:
-                    # imaplib ya parsea; aquí solo usamos payload si viene. Si no, confiar en Date header más abajo.
-                    pass
                 headers_raw = payload or headers_raw
 
-            # Evitamos duplicados si ya fue "Notified" / \Flagged
             if already_notified_flags(flags):
                 continue
 
@@ -201,13 +192,11 @@ def main():
 
             name, addr = normalize_addr(from_hdr)
 
-            # Validamos remitente y asunto
             if not match_sender(addr, senders):
                 continue
             if not subject_matches(subject, subj_keywords):
                 continue
 
-            # Filtrado por fecha reciente para genérico (si cabía algo antiguo)
             if date_hdr:
                 try:
                     dt = parsedate_to_datetime(date_hdr)
@@ -218,18 +207,8 @@ def main():
             else:
                 dt = None
 
-            if dt is None:
-                # fallback: no date => dejamos pasar pero es raro
-                dt_ok = True
-            else:
-                dt_ok = (datetime.now(timezone.utc) - dt) <= timedelta(days=2)
-
-            if not dt_ok:
-                continue
-
-            # Construimos texto Telegram
-            gmail_link = build_gmail_link_from_msgid(message_id) if gmail_mode else None
             when_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "desconocida"
+            gmail_link = build_gmail_link_from_msgid(message_id) if gmail_mode else None
 
             safe_from = f"{name} <{addr}>" if name else addr
             text = (
@@ -241,24 +220,20 @@ def main():
             if gmail_link:
                 text += f'🔗 <a href="{gmail_link}">Abrir en Gmail</a>\n'
 
-            # Enviar Telegram
             try:
                 send_telegram(TELEGRAM_TOKEN, TELEGRAM_CHAT, text)
             except Exception as e:
                 print(f"[WARN] Error al enviar Telegram: {e}")
                 continue
 
-            # Marcar como notificado
             stored = False
-            if gmail_mode and getenv_bool("GMAIL_LABEL", True):
+            if gmail_mode and gmail_label_mode:
                 stored = add_notified_marker_gmail(M, uid, os.getenv("GMAIL_LABEL_NAME", "Notified"))
 
             if not stored:
-                if getenv_bool("ADD_IMAP_KEYWORD", True):
-                    stored = add_notified_flag_imap(M, uid, os.getenv("IMAP_KEYWORD_NAME", "Notified"))
+                stored = add_notified_flag_imap(M, uid, os.getenv("IMAP_KEYWORD_NAME", "Notified"))
 
-            # Opcional: marcar como leído si así se pide
-            if not stored and getenv_bool("MARK_AS_READ", False):
+            if not stored and mark_as_read:
                 try:
                     M.uid("STORE", uid, "+FLAGS", r"(\Seen)")
                 except Exception as e:
