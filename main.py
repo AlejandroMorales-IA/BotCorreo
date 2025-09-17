@@ -146,7 +146,7 @@ def main():
         if gmail_mode:
             # ✅ Nueva lógica: búsqueda separada por cada remitente
             for s in senders:
-                gm_query = f'from:({s.strip()}) -label:Notified newer_than:{max(5, min(recent_minutes, 1440))}m'
+                gm_query = f'from:{s.strip()} -label:Notified newer_than:{max(5, min(recent_minutes, 1440))}m'
                 log(f"Gmail search query: {gm_query}")
                 typ, data = M.uid("SEARCH", None, "X-GM-RAW", gm_query)
                 log(f"SEARCH {s}: typ={typ}, data={data}")
