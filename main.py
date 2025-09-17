@@ -6,7 +6,7 @@ from email.utils import parsedate_to_datetime, parseaddr
 from datetime import datetime, timezone, timedelta
 import requests
 
-DEBUG = True  # 👈 activa el modo debug
+DEBUG = True  # 👈 activar/desactivar logs
 
 def log(msg):
     if DEBUG:
@@ -141,19 +141,17 @@ def main():
     M = imap_connect()
     try:
         M.select(folder, readonly=False)
-
         uids_to_process = set()
 
         if gmail_mode:
-            # Unimos todos los remitentes en un solo OR dentro de from:()
-            or_clause = " OR ".join([s.strip() for s in senders])
-            gm_query = f'from:({or_clause}) -label:Notified newer_than:{max(5, min(recent_minutes, 1440))}m'
-            log(f"Gmail search query: {gm_query}")
-            typ, data = M.uid("SEARCH", None, "X-GM-RAW", gm_query)
-            log(f"SEARCH result typ={typ}, data={data}")
-            if typ == "OK" and data and data[0]:
-                uids_to_process.update(data[0].decode().split())
-
+            # ✅ Nueva lógica: búsqueda separada por cada remitente
+            for s in senders:
+                gm_query = f'from:({s.strip()}) -label:Notified newer_than:{max(5, min(recent_minutes, 1440))}m'
+                log(f"Gmail search query: {gm_query}")
+                typ, data = M.uid("SEARCH", None, "X-GM-RAW", gm_query)
+                log(f"SEARCH {s}: typ={typ}, data={data}")
+                if typ == "OK" and data and data[0]:
+                    uids_to_process.update(data[0].decode().split())
         else:
             since_date = (datetime.now(timezone.utc) - timedelta(minutes=recent_minutes)).date()
             since_str = since_date.strftime("%d-%b-%Y")
@@ -170,16 +168,73 @@ def main():
                 continue
 
             headers_raw = b""
+            flags = b""
             for part in data:
                 if not isinstance(part, tuple):
                     continue
-                _, payload = part
+                meta, payload = part
+                meta_str = meta.decode(errors="ignore") if isinstance(meta, bytes) else str(meta)
+                if "FLAGS" in meta_str:
+                    flags = meta
                 headers_raw = payload or headers_raw
+
+            if already_notified_flags(flags):
+                continue
 
             msg = email.message_from_bytes(headers_raw)
             from_hdr = decode_mime_words(msg.get("From"))
             subject = decode_mime_words(msg.get("Subject"))
-            log(f"Found UID {uid}: from={from_hdr}, subject={subject}")
+            date_hdr = msg.get("Date")
+            message_id = (msg.get("Message-ID") or "").strip()
+
+            name, addr = normalize_addr(from_hdr)
+
+            if not match_sender(addr, senders):
+                continue
+            if not subject_matches(subject, subj_keywords):
+                continue
+
+            if date_hdr:
+                try:
+                    dt = parsedate_to_datetime(date_hdr)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                except:
+                    dt = None
+            else:
+                dt = None
+
+            when_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "desconocida"
+            gmail_link = build_gmail_link_from_msgid(message_id) if gmail_mode else None
+
+            safe_from = f"{name} <{addr}>" if name else addr
+            text = (
+                "📧 <b>Nuevo correo importante</b>\n"
+                f"👤 De: <b>{safe_from}</b>\n"
+                f"📝 Asunto: <b>{(subject or '(sin asunto)').strip()}</b>\n"
+                f"🗓️ Fecha: {when_str}\n"
+            )
+            if gmail_link:
+                text += f'🔗 <a href="{gmail_link}">Abrir en Gmail</a>\n'
+
+            try:
+                send_telegram(TELEGRAM_TOKEN, TELEGRAM_CHAT, text)
+            except Exception as e:
+                print(f"[WARN] Error al enviar Telegram: {e}")
+                continue
+
+            stored = False
+            if gmail_mode and gmail_label_mode:
+                stored = add_notified_marker_gmail(M, uid, os.getenv("GMAIL_LABEL_NAME", "Notified"))
+
+            if not stored:
+                stored = add_notified_flag_imap(M, uid, os.getenv("IMAP_KEYWORD_NAME", "Notified"))
+
+            if not stored and mark_as_read:
+                try:
+                    M.uid("STORE", uid, "+FLAGS", r"(\Seen)")
+                except Exception as e:
+                    print(f"[WARN] No se pudo marcar como leído: {e}")
 
         M.logout()
     except Exception as e:
