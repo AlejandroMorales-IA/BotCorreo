@@ -249,7 +249,7 @@ def main():
             else:
                 dt = None
 
-            when_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "desconocida"
+            when_str = dt.astimezone().strftime("%d-%m-%Y %H:%M:%S %Z") if dt else "desconocida"
             gmail_link = build_gmail_link_from_msgid(message_id) if gmail_mode else None
 
             # Escapamos remitente y asunto para evitar errores en Telegram
