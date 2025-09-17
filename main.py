@@ -6,6 +6,7 @@ from email.header import decode_header
 from email.utils import parsedate_to_datetime, parseaddr
 from datetime import datetime, timezone, timedelta
 import requests
+import html
 
 DEBUG = True  # pon False cuando ya funcione
 
@@ -251,11 +252,15 @@ def main():
             when_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "desconocida"
             gmail_link = build_gmail_link_from_msgid(message_id) if gmail_mode else None
 
+            # Escapamos remitente y asunto para evitar errores en Telegram
             safe_from = f"{name} <{addr}>" if name else addr
+            safe_from = html.escape(safe_from)
+            subject_safe = html.escape(subject or "(sin asunto)")
+            
             text = (
                 "📧 <b>Nuevo correo importante</b>\n"
                 f"👤 De: <b>{safe_from}</b>\n"
-                f"📝 Asunto: <b>{(subject or '(sin asunto)').strip()}</b>\n"
+                f"📝 Asunto: <b>{subject_safe}</b>\n"
                 f"🗓️ Fecha: {when_str}\n"
             )
             if gmail_link:
